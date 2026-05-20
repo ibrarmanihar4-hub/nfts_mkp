@@ -7,6 +7,7 @@ export const dynamic = 'force-dynamic';
 
 const PatchWatch = z.object({
   enabled: z.boolean().optional(),
+  autoBuy: z.boolean().optional(),
   maxPriceDoge: z.string().optional(),
 });
 
@@ -17,8 +18,9 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({ error: 'invalid body' }, { status: 400 });
   }
 
-  const data: { enabled?: boolean; maxPriceShibes?: bigint } = {};
+  const data: { enabled?: boolean; autoBuy?: boolean; maxPriceShibes?: bigint } = {};
   if (parsed.data.enabled !== undefined) data.enabled = parsed.data.enabled;
+  if (parsed.data.autoBuy !== undefined) data.autoBuy = parsed.data.autoBuy;
   if (parsed.data.maxPriceDoge !== undefined) {
     try {
       data.maxPriceShibes = dogeToShibes(parsed.data.maxPriceDoge);

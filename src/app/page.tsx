@@ -7,6 +7,7 @@ interface Watch {
   slug: string;
   maxPriceDoge: string;
   enabled: boolean;
+  autoBuy: boolean;
 }
 interface Hit {
   id: string;
@@ -18,22 +19,39 @@ interface Hit {
   listedAt: string;
   detectedAt: string;
   status: string;
+  txId: string | null;
+  notes: string | null;
+}
+interface WalletInfo {
+  configured: boolean;
+  unlocked: boolean;
+  address: string | null;
+}
+interface SettingsInfo {
+  dryRun: boolean;
+  dailyCapDoge: string;
 }
 
 export default function Home() {
   const [watches, setWatches] = useState<Watch[]>([]);
   const [hits, setHits] = useState<Hit[]>([]);
+  const [wallet, setWallet] = useState<WalletInfo | null>(null);
+  const [settings, setSettings] = useState<SettingsInfo | null>(null);
   const [slug, setSlug] = useState('');
   const [maxPrice, setMaxPrice] = useState('');
   const [busy, setBusy] = useState(false);
 
   async function refresh() {
-    const [w, h] = await Promise.all([
+    const [w, h, wal, s] = await Promise.all([
       fetch('/api/watches').then((r) => r.json()),
       fetch('/api/hits').then((r) => r.json()),
+      fetch('/api/wallet').then((r) => r.json()),
+      fetch('/api/settings').then((r) => r.json()),
     ]);
     setWatches(w);
     setHits(h);
+    setWallet(wal);
+    setSettings(s);
   }
 
   useEffect(() => {
@@ -64,11 +82,11 @@ export default function Home() {
     }
   }
 
-  async function toggleWatch(w: Watch) {
+  async function patchWatch(w: Watch, body: Partial<Watch>) {
     await fetch(`/api/watches/${w.id}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ enabled: !w.enabled }),
+      body: JSON.stringify(body),
     });
     await refresh();
   }
@@ -79,13 +97,24 @@ export default function Home() {
     await refresh();
   }
 
+  async function buyHit(h: Hit) {
+    if (!confirm(`Buy ${h.slug} #${h.inscriptionNumber} for ${h.priceDoge} DOGE?`)) return;
+    const res = await fetch(`/api/buy/${h.id}`, { method: 'POST' });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) alert(`Buy failed: ${j.error ?? res.status}`);
+    else if (j.dryRun) alert('Dry run — no transaction submitted. See hit notes.');
+    else if (j.txId) alert(`Submitted! txid: ${j.txId}`);
+    await refresh();
+  }
+
   return (
     <div className="container">
       <h1>🎯 Doggy Sniper</h1>
       <p className="subtitle">
-        Auto-monitor doggy.market collections. Get alerted (and eventually auto-buy) when a
-        listing drops below your max price.
+        Auto-monitor doggy.market collections and snipe listings below your max price.
       </p>
+
+      <WalletPanel wallet={wallet} settings={settings} onChange={refresh} />
 
       <h2>Add watch</h2>
       <div className="panel">
@@ -122,6 +151,7 @@ export default function Home() {
                 <th>Collection</th>
                 <th>Max price</th>
                 <th>Status</th>
+                <th>Auto-buy</th>
                 <th />
               </tr>
             </thead>
@@ -143,8 +173,21 @@ export default function Home() {
                       {w.enabled ? 'enabled' : 'paused'}
                     </span>
                   </td>
+                  <td>
+                    <label className="row" style={{ gap: 6 }}>
+                      <input
+                        type="checkbox"
+                        checked={w.autoBuy}
+                        onChange={(e) => patchWatch(w, { autoBuy: e.target.checked })}
+                      />
+                      <span className="badge muted">{w.autoBuy ? 'on' : 'off'}</span>
+                    </label>
+                  </td>
                   <td className="row" style={{ justifyContent: 'flex-end' }}>
-                    <button className="secondary" onClick={() => toggleWatch(w)}>
+                    <button
+                      className="secondary"
+                      onClick={() => patchWatch(w, { enabled: !w.enabled })}
+                    >
                       {w.enabled ? 'Pause' : 'Resume'}
                     </button>
                     <button className="danger" onClick={() => deleteWatch(w)}>
@@ -171,6 +214,7 @@ export default function Home() {
                 <th>Inscription</th>
                 <th>Price</th>
                 <th>Status</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -189,7 +233,31 @@ export default function Home() {
                   </td>
                   <td>{h.priceDoge} DOGE</td>
                   <td>
-                    <span className="badge muted">{h.status}</span>
+                    <span className={`badge ${badgeClass(h.status)}`}>{h.status}</span>
+                    {h.txId && (
+                      <>
+                        {' '}
+                        <a
+                          href={`https://dogechain.info/tx/${h.txId}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mono"
+                          style={{ fontSize: 11 }}
+                        >
+                          tx
+                        </a>
+                      </>
+                    )}
+                    {h.notes && (
+                      <div style={{ fontSize: 11, color: 'var(--muted)' }}>{h.notes}</div>
+                    )}
+                  </td>
+                  <td style={{ textAlign: 'right' }}>
+                    {(h.status === 'NOTIFIED' || h.status === 'FAILED' || h.status === 'SKIPPED') && (
+                      <button className="secondary" onClick={() => buyHit(h)}>
+                        Buy now
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -198,5 +266,162 @@ export default function Home() {
         )}
       </div>
     </div>
+  );
+}
+
+function badgeClass(status: string): string {
+  if (status === 'BOUGHT') return 'good';
+  if (status === 'FAILED') return 'bad';
+  return 'muted';
+}
+
+function WalletPanel({
+  wallet,
+  settings,
+  onChange,
+}: {
+  wallet: WalletInfo | null;
+  settings: SettingsInfo | null;
+  onChange: () => void;
+}) {
+  const [wif, setWif] = useState('');
+  const [pass, setPass] = useState('');
+  const [unlockPass, setUnlockPass] = useState('');
+  const [dailyCap, setDailyCap] = useState('');
+
+  if (!wallet || !settings) return null;
+
+  async function setup() {
+    if (!wif || pass.length < 8) return alert('Provide WIF + passphrase (8+ chars)');
+    if (!confirm('Save encrypted WIF? Existing key will be overwritten.')) return;
+    const res = await fetch('/api/wallet', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ wif, passphrase: pass }),
+    });
+    const j = await res.json();
+    if (!res.ok) return alert(j.error ?? 'failed');
+    alert(`Saved. Address: ${j.address}`);
+    setWif('');
+    setPass('');
+    onChange();
+  }
+
+  async function unlock() {
+    const res = await fetch('/api/wallet/unlock', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ passphrase: unlockPass }),
+    });
+    const j = await res.json();
+    if (!res.ok) return alert(j.error ?? 'failed');
+    setUnlockPass('');
+    onChange();
+  }
+
+  async function lock() {
+    await fetch('/api/wallet/lock', { method: 'POST' });
+    onChange();
+  }
+
+  async function toggleDryRun() {
+    await fetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dryRun: !settings!.dryRun }),
+    });
+    onChange();
+  }
+
+  async function saveCap() {
+    await fetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dailyCapDoge: dailyCap || '0' }),
+    });
+    setDailyCap('');
+    onChange();
+  }
+
+  return (
+    <>
+      <h2>Wallet & safety</h2>
+      <div className="panel">
+        <div className="row" style={{ marginBottom: 12, justifyContent: 'space-between' }}>
+          <div>
+            <div>
+              <span className="badge muted">address</span>{' '}
+              <span className="mono">{wallet.address ?? '— not configured —'}</span>
+            </div>
+            <div style={{ marginTop: 4 }}>
+              <span className={`badge ${wallet.unlocked ? 'good' : 'bad'}`}>
+                {wallet.unlocked ? 'unlocked' : wallet.configured ? 'locked' : 'not configured'}
+              </span>{' '}
+              <span className={`badge ${settings.dryRun ? 'muted' : 'bad'}`}>
+                {settings.dryRun ? 'DRY RUN' : 'LIVE'}
+              </span>{' '}
+              <span className="badge muted">
+                daily cap:{' '}
+                {settings.dailyCapDoge === '0' ? 'unlimited' : `${settings.dailyCapDoge} DOGE`}
+              </span>
+            </div>
+          </div>
+          <div className="row">
+            <button className="secondary" onClick={toggleDryRun}>
+              {settings.dryRun ? 'Go live' : 'Enable dry run'}
+            </button>
+            {wallet.unlocked && (
+              <button className="secondary" onClick={lock}>
+                Lock
+              </button>
+            )}
+          </div>
+        </div>
+
+        {!wallet.configured ? (
+          <div className="row">
+            <input
+              placeholder="Dogecoin WIF private key (Q… or 6…)"
+              value={wif}
+              onChange={(e) => setWif(e.target.value)}
+              style={{ flex: 1, minWidth: 240 }}
+              type="password"
+            />
+            <input
+              placeholder="passphrase (8+ chars)"
+              value={pass}
+              onChange={(e) => setPass(e.target.value)}
+              style={{ width: 220 }}
+              type="password"
+            />
+            <button onClick={setup}>Save encrypted</button>
+          </div>
+        ) : !wallet.unlocked ? (
+          <div className="row">
+            <input
+              placeholder="passphrase to unlock"
+              value={unlockPass}
+              onChange={(e) => setUnlockPass(e.target.value)}
+              style={{ flex: 1, minWidth: 240 }}
+              type="password"
+            />
+            <button onClick={unlock}>Unlock</button>
+          </div>
+        ) : (
+          <div className="row">
+            <input
+              placeholder={`daily cap in DOGE (current: ${settings.dailyCapDoge}; 0 = unlimited)`}
+              value={dailyCap}
+              onChange={(e) => setDailyCap(e.target.value)}
+              style={{ flex: 1, minWidth: 240 }}
+              inputMode="decimal"
+            />
+            <button className="secondary" onClick={saveCap}>
+              Save cap
+            </button>
+          </div>
+        )}
+      </div>
+    </>
   );
 }

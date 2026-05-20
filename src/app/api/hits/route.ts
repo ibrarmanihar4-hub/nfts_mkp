@@ -22,6 +22,8 @@ export async function GET() {
       listedAt: h.listedAt,
       detectedAt: h.detectedAt,
       status: h.status,
+      txId: h.txId,
+      notes: h.notes,
     })),
   );
 }

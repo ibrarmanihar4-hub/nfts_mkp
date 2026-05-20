@@ -15,6 +15,7 @@ model Watch {
   slug            String   @unique // e.g. "doginal-primes"
   maxPriceShibes  BigInt
   enabled         Boolean  @default(true)
+  autoBuy         Boolean  @default(false) // when true + Settings.dryRun=false, executor fires
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   hits            Hit[]
@@ -30,10 +31,30 @@ model Hit {
   sellerAddress      String
   listedAt           DateTime
   detectedAt         DateTime @default(now())
-  // Lifecycle: DETECTED -> NOTIFIED -> (BUYING -> BOUGHT | FAILED)
+  // Lifecycle: DETECTED -> NOTIFIED -> (BUYING -> BOUGHT | FAILED | SKIPPED)
   status             String   @default("DETECTED")
+  txId               String?
   notes              String?
 
   @@unique([watchId, inscriptionId])
   @@index([detectedAt])
+}
+
+// Singleton config row (id="default"). Keeps us out of process.env for runtime knobs.
+model Settings {
+  id              String  @id @default("default")
+  dryRun          Boolean @default(true)        // log only; never submit
+  dailyCapShibes  BigInt  @default(0)           // 0 = unlimited
+  updatedAt       DateTime @updatedAt
+}
+
+// Encrypted Dogecoin private key. There is at most one row.
+model WalletKey {
+  id           String   @id @default("default")
+  address      String   // derived P2PKH address (Dogecoin: D...)
+  // AES-256-GCM(scrypt(passphrase)) over the raw 32-byte privkey.
+  cipher       String   // base64
+  iv           String   // base64
+  salt         String   // base64
+  createdAt    DateTime @default(now())
 }

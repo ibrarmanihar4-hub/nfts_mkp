@@ -9,6 +9,7 @@
 import { prisma } from './prisma';
 import { fetchRecentListings } from './doggy';
 import { notifyHit } from './notify';
+import { executeBuy } from './executor';
 
 export interface PollSummary {
   checkedAt: string;
@@ -65,6 +66,14 @@ export async function pollOnce(): Promise<PollSummary> {
             data: { status: 'NOTIFIED' },
           });
           summary.newHits += 1;
+
+          // Auto-buy if the watch opted in. Fire-and-forget so one slow buy
+          // doesn't block the rest of the poll cycle.
+          if (w.autoBuy) {
+            void executeBuy(created.id).catch((err) => {
+              console.error(`[poller] auto-buy ${created.id} failed:`, err);
+            });
+          }
         }
       }
     } catch (err) {

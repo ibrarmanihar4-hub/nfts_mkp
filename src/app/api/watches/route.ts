@@ -23,6 +23,7 @@ export async function GET() {
       slug: w.slug,
       maxPriceDoge: shibesToDoge(w.maxPriceShibes),
       enabled: w.enabled,
+      autoBuy: w.autoBuy,
     })),
   );
 }

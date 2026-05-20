@@ -1,0 +1,39 @@
+// Doggy.market sniper schema.
+// Prices are stored in shibes (1 DOGE = 100,000,000 shibes) to avoid float drift.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Watch {
+  id              String   @id @default(cuid())
+  slug            String   @unique // e.g. "doginal-primes"
+  maxPriceShibes  BigInt
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  hits            Hit[]
+}
+
+model Hit {
+  id                 String   @id @default(cuid())
+  watchId            String
+  watch              Watch    @relation(fields: [watchId], references: [id], onDelete: Cascade)
+  inscriptionId      String
+  inscriptionNumber  Int?
+  priceShibes        BigInt
+  sellerAddress      String
+  listedAt           DateTime
+  detectedAt         DateTime @default(now())
+  // Lifecycle: DETECTED -> NOTIFIED -> (BUYING -> BOUGHT | FAILED)
+  status             String   @default("DETECTED")
+  notes              String?
+
+  @@unique([watchId, inscriptionId])
+  @@index([detectedAt])
+}

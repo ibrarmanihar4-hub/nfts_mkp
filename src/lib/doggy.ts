@@ -73,11 +73,33 @@ export async function createBuyingPSBT(input: {
   buyerAddress: string;
   buyerTokenReceiveAddress?: string;
 }): Promise<DoggyBuyingPSBT> {
-  return postJson<DoggyBuyingPSBT>('/buyer/createBuyingPSBT', {
-    listingId: input.listingId,
-    buyerAddress: input.buyerAddress,
-    buyerTokenReceiveAddress: input.buyerTokenReceiveAddress ?? input.buyerAddress,
+  const res = await fetch(`${BASE}/buyer/createBuyingPSBT`, {
+    method: 'POST',
+    headers: {
+      accept: '*/*',
+      'content-type': 'application/json',
+      'user-agent': UA,
+      origin: 'https://doggy.market',
+      referer: 'https://doggy.market/',
+    },
+    body: JSON.stringify({
+      listingId: input.listingId,
+      buyerAddress: input.buyerAddress,
+      buyerTokenReceiveAddress: input.buyerTokenReceiveAddress ?? input.buyerAddress,
+    }),
+    cache: 'no-store',
   });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`doggy.market POST /buyer/createBuyingPSBT returned ${res.status}: ${text.slice(0, 300)}`);
+  }
+  // Response can be either JSON or plain PSBT base64 string
+  try {
+    return JSON.parse(text) as DoggyBuyingPSBT;
+  } catch {
+    // Plain text = the PSBT base64 itself
+    return { buyingPSBTBase64: text.trim() } as DoggyBuyingPSBT;
+  }
 }
 
 export async function buyListing(input: {
@@ -97,17 +119,37 @@ export async function buyListing(input: {
 // Create dummy UTXOs via doggy.market's own endpoint.
 // Returns a PSBT that the buyer must sign and broadcast.
 export async function createDummyPSBT(buyerAddress: string): Promise<{ psbtBase64: string }> {
-  const data = await postJson<any>('/buyer/createDummyPSBT', { buyerAddress });
-  // Response might have different field names - check common ones
-  const psbt = data.psbtBase64 ?? data.buyingPSBTBase64 ?? data.psbt ?? data.dummyPSBTBase64;
-  if (!psbt && typeof data === 'string') {
-    // Maybe the response IS the PSBT base64 directly
-    return { psbtBase64: data };
+  const res = await fetch(`${BASE}/buyer/createDummyPSBT`, {
+    method: 'POST',
+    headers: {
+      accept: '*/*',
+      'content-type': 'application/json',
+      'user-agent': UA,
+      origin: 'https://doggy.market',
+      referer: 'https://doggy.market/',
+    },
+    body: JSON.stringify({ buyerAddress }),
+    cache: 'no-store',
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`doggy.market createDummyPSBT returned ${res.status}: ${text.slice(0, 300)}`);
   }
-  if (!psbt) {
-    throw new Error(`createDummyPSBT returned no psbt: ${JSON.stringify(data).slice(0, 300)}`);
+  // Response can be JSON or plain PSBT base64 string
+  try {
+    const data = JSON.parse(text);
+    const psbt = data.psbtBase64 ?? data.buyingPSBTBase64 ?? data.psbt ?? data.dummyPSBTBase64;
+    if (psbt) return { psbtBase64: psbt };
+    // Maybe the JSON itself is just a string
+    if (typeof data === 'string') return { psbtBase64: data };
+    throw new Error(`no psbt field in response: ${JSON.stringify(data).slice(0, 200)}`);
+  } catch (e) {
+    // Not JSON — the text IS the PSBT base64
+    if (text.startsWith('cHNi')) {
+      return { psbtBase64: text.trim() };
+    }
+    throw new Error(`createDummyPSBT unexpected response: ${text.slice(0, 200)}`);
   }
-  return { psbtBase64: psbt };
 }
 
 // Broadcast a signed raw TX hex via doggy.market's broadcast endpoint.

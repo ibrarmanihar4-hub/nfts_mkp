@@ -48,9 +48,16 @@ export async function fetchUtxos(address: string): Promise<Utxo[]> {
 
 export async function hasDummyUtxos(address: string): Promise<boolean> {
   const utxos = await fetchUtxos(address);
-  // Need at least 2 UTXOs with value == DUMMY_VALUE
-  const dummies = utxos.filter((u) => u.value === DUMMY_VALUE);
-  return dummies.length >= 2;
+  // Need at least 2 CONFIRMED UTXOs with value == DUMMY_VALUE
+  // doggy.market only accepts confirmed UTXOs
+  const confirmedDummies = utxos.filter((u) => u.value === DUMMY_VALUE && u.confirmations >= 1);
+  return confirmedDummies.length >= 2;
+}
+
+export async function hasUnconfirmedDummies(address: string): Promise<boolean> {
+  const utxos = await fetchUtxos(address);
+  const unconfirmedDummies = utxos.filter((u) => u.value === DUMMY_VALUE && u.confirmations === 0);
+  return unconfirmedDummies.length >= 2;
 }
 
 export async function createDummySplit(

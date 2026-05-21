@@ -20,7 +20,7 @@ import { bitcoin, dogecoinNetwork } from './dogecoin';
 import { getUnlockedSigner } from './wallet';
 import { fetchInscription, createBuyingPSBT, buyListing } from './doggy';
 import { shibesToDoge } from './units';
-import { hasDummyUtxos, createDummySplit } from './utxo';
+import { hasDummyUtxos, createDummySplit, hasUnconfirmedDummies } from './utxo';
 
 const inFlight = new Set<string>();
 
@@ -122,12 +122,25 @@ export async function executeBuy(hitId: string): Promise<ExecuteResult> {
     // Handle "no dummy utxos" error by auto-splitting
     const quoteError = typeof quote === 'object' && 'error' in quote ? (quote as any).error : null;
     if (quoteError && /dummy.?utxo/i.test(quoteError)) {
+      // Check if we already have unconfirmed dummies (from a previous split)
+      const hasUnconfirmed = await hasUnconfirmedDummies(signer.address).catch(() => false);
+      if (hasUnconfirmed) {
+        await prisma.hit.update({
+          where: { id: hit.id },
+          data: {
+            status: 'FAILED',
+            notes: 'dummy UTXOs exist but unconfirmed — wait for next block (~1 min) then retry',
+          },
+        });
+        return { ok: false, status: 'FAILED', error: 'dummy UTXOs unconfirmed — wait for next block' };
+      }
+
       console.log(`[executor] no dummy utxos — creating split TX for ${signer.address}`);
       try {
         const split = await createDummySplit(signer.address, signer.keyPair);
-        console.log(`[executor] split TX ${split.txId} broadcast, waiting 10s for propagation...`);
-        // Wait for the split TX to propagate to doggy.market's mempool
-        await new Promise((r) => setTimeout(r, 10_000));
+        console.log(`[executor] split TX ${split.txId} broadcast, waiting 65s for confirmation...`);
+        // Wait for a Dogecoin block (~60s avg)
+        await new Promise((r) => setTimeout(r, 65_000));
         // Retry createBuyingPSBT
         quote = await createBuyingPSBT({
           listingId,

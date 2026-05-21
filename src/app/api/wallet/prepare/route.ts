@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getUnlockedSigner } from '@/lib/wallet';
-import { hasDummyUtxos, createDummySplit } from '@/lib/utxo';
+import { hasDummyUtxos, createDummySplit, hasUnconfirmedDummies } from '@/lib/utxo';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,10 +10,19 @@ export async function POST() {
   try {
     const signer = getUnlockedSigner();
 
-    // Check if we already have dummies
+    // Check if we already have confirmed dummies
     const hasDummies = await hasDummyUtxos(signer.address);
     if (hasDummies) {
-      return NextResponse.json({ ok: true, message: 'already have dummy UTXOs' });
+      return NextResponse.json({ ok: true, message: 'already have confirmed dummy UTXOs — ready to buy' });
+    }
+
+    // Check if we have unconfirmed ones (from a previous split)
+    const hasUnconfirmed = await hasUnconfirmedDummies(signer.address);
+    if (hasUnconfirmed) {
+      return NextResponse.json({
+        ok: true,
+        message: 'dummy UTXOs already created but waiting for confirmation (~1 min). Do NOT create more — just wait.',
+      });
     }
 
     const result = await createDummySplit(signer.address, signer.keyPair);
@@ -21,7 +30,7 @@ export async function POST() {
       ok: true,
       txId: result.txId,
       dummyCount: result.dummyCount,
-      message: `Created ${result.dummyCount} dummy UTXOs. Wait ~1 min for confirmation before buying.`,
+      message: `Created ${result.dummyCount} dummy UTXOs. Wait ~1 min for block confirmation before buying.`,
     });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 400 });
@@ -32,8 +41,18 @@ export async function POST() {
 export async function GET() {
   try {
     const signer = getUnlockedSigner();
-    const ready = await hasDummyUtxos(signer.address);
-    return NextResponse.json({ ready, address: signer.address });
+    const confirmed = await hasDummyUtxos(signer.address);
+    const unconfirmed = !confirmed && await hasUnconfirmedDummies(signer.address);
+    return NextResponse.json({
+      ready: confirmed,
+      pendingConfirmation: unconfirmed,
+      address: signer.address,
+      message: confirmed
+        ? 'ready to buy'
+        : unconfirmed
+          ? 'dummy UTXOs pending confirmation (~1 min)'
+          : 'no dummy UTXOs — click Prepare',
+    });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 400 });
   }

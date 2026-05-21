@@ -1,10 +1,10 @@
 // Polling engine: walks every enabled Watch and records new under-priced listings.
 //
-// Two ways to drive it:
-//   1. Long-running mode: `startPoller()` spins up a setInterval inside the Node
-//      process. Good for `next dev` and self-hosted/VPS deploys.
-//   2. Cron mode: hit `POST /api/poll` from an external scheduler (Vercel Cron,
-//      GitHub Actions, etc.). Calls `pollOnce()` and returns.
+// Optimized for SPEED:
+//   - Collections fetched in parallel
+//   - Auto-buy fires IMMEDIATELY on detection (before notification)
+//   - No unnecessary DB writes before buy attempt
+//   - Poll interval can be as low as 500ms
 
 import { prisma } from './prisma';
 import { fetchRecentListings } from './doggy';
@@ -27,9 +27,22 @@ export async function pollOnce(): Promise<PollSummary> {
     errors: [],
   };
 
-  for (const w of watches) {
-    try {
+  // Fetch ALL collections in parallel for maximum speed
+  const results = await Promise.allSettled(
+    watches.map(async (w) => {
       const listings = await fetchRecentListings(w.slug);
+      return { watch: w, listings };
+    }),
+  );
+
+  for (const result of results) {
+    if (result.status === 'rejected') {
+      summary.errors.push({ slug: '?', message: String(result.reason) });
+      continue;
+    }
+    const { watch: w, listings } = result.value;
+
+    try {
       for (const l of listings) {
         const price = BigInt(l.price);
         if (price > w.maxPriceShibes) continue;
@@ -51,29 +64,36 @@ export async function pollOnce(): Promise<PollSummary> {
           update: {}, // never overwrite — we only care about the first sighting
         });
 
-        // Only fire notifications on a fresh DETECTED row.
+        // Only act on fresh DETECTED rows (within last 60s).
         if (created.status === 'DETECTED' && created.detectedAt.getTime() > Date.now() - 60_000) {
-          await notifyHit({
-            slug: w.slug,
-            inscriptionId: l.inscriptionId,
-            inscriptionNumber: l.inscriptionNumber,
-            priceShibes: price,
-            maxPriceShibes: w.maxPriceShibes,
-            sellerAddress: l.sellerAddress,
-          });
-          await prisma.hit.update({
-            where: { id: created.id },
-            data: { status: 'NOTIFIED' },
-          });
           summary.newHits += 1;
 
-          // Auto-buy if the watch opted in. Fire-and-forget so one slow buy
-          // doesn't block the rest of the poll cycle.
+          // AUTO-BUY FIRST — speed is critical. Fire immediately, don't wait for notification.
           if (w.autoBuy) {
             void executeBuy(created.id).catch((err) => {
               console.error(`[poller] auto-buy ${created.id} failed:`, err);
             });
           }
+
+          // Notification in background — don't block the buy
+          void (async () => {
+            try {
+              await notifyHit({
+                slug: w.slug,
+                inscriptionId: l.inscriptionId,
+                inscriptionNumber: l.inscriptionNumber,
+                priceShibes: price,
+                maxPriceShibes: w.maxPriceShibes,
+                sellerAddress: l.sellerAddress,
+              });
+              await prisma.hit.update({
+                where: { id: created.id },
+                data: { status: w.autoBuy ? created.status : 'NOTIFIED' },
+              });
+            } catch (e) {
+              console.error('[poller] notify failed:', e);
+            }
+          })();
         }
       }
     } catch (err) {
@@ -91,7 +111,7 @@ const globalForPoller = globalThis as unknown as { __doggyPoller?: NodeJS.Timeou
 
 export function startPoller(): void {
   if (globalForPoller.__doggyPoller) return; // already running
-  const interval = Number(process.env.POLL_INTERVAL_MS ?? 5000);
+  const interval = Number(process.env.POLL_INTERVAL_MS ?? 2000);
   console.log(`[poller] starting, interval=${interval}ms`);
   // Fire immediately, then on a timer.
   void pollOnce();

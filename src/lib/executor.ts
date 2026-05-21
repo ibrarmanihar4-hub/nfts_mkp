@@ -20,7 +20,7 @@ import { bitcoin, dogecoinNetwork } from './dogecoin';
 import { getUnlockedSigner } from './wallet';
 import { fetchInscription, createBuyingPSBT, buyListing } from './doggy';
 import { shibesToDoge } from './units';
-import { hasDummyUtxos, createDummySplit, hasUnconfirmedDummies } from './utxo';
+import { hasDummyUtxos, createDummySplit } from './utxo';
 
 const inFlight = new Set<string>();
 
@@ -122,19 +122,6 @@ export async function executeBuy(hitId: string): Promise<ExecuteResult> {
     // Handle "no dummy utxos" error by auto-splitting
     const quoteError = typeof quote === 'object' && 'error' in quote ? (quote as any).error : null;
     if (quoteError && /dummy.?utxo/i.test(quoteError)) {
-      // Check if we already have unconfirmed dummies (from a previous split)
-      const hasUnconfirmed = await hasUnconfirmedDummies(signer.address).catch(() => false);
-      if (hasUnconfirmed) {
-        await prisma.hit.update({
-          where: { id: hit.id },
-          data: {
-            status: 'FAILED',
-            notes: 'dummy UTXOs exist but unconfirmed — wait for next block (~1 min) then retry',
-          },
-        });
-        return { ok: false, status: 'FAILED', error: 'dummy UTXOs unconfirmed — wait for next block' };
-      }
-
       console.log(`[executor] no dummy utxos — creating split TX for ${signer.address}`);
       try {
         const split = await createDummySplit(signer.address, signer.keyPair);

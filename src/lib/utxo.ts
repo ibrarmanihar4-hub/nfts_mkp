@@ -21,8 +21,10 @@ const BLOCKCYPHER_BASE = 'https://api.blockcypher.com/v1/doge/main';
 const DUMMY_VALUE = 100_000n;
 // How many dummy UTXOs to create per split
 const DUMMY_COUNT = 5;
-// Minimum fee for a split TX (conservative for ~250-byte TX)
-const SPLIT_FEE = 2_000_000n; // 0.02 DOGE
+// Fee for a split TX. Dogecoin miners currently require ~0.5-2.4 DOGE/KB.
+// A split TX is ~300 bytes, so we need at least 0.15-0.7 DOGE.
+// Using 0.5 DOGE (50,000,000 shibes) to guarantee fast confirmation.
+const SPLIT_FEE = 50_000_000n; // 0.5 DOGE
 
 export interface Utxo {
   txHash: string;
@@ -67,14 +69,18 @@ export async function createDummySplit(
   const utxos = await fetchUtxos(address);
   if (utxos.length === 0) throw new Error('no UTXOs available to split');
 
-  // Pick the largest UTXO to split
-  const sorted = [...utxos].sort((a, b) => (b.value > a.value ? 1 : -1));
+  // Pick the largest CONFIRMED UTXO to split (prefer confirmed over unconfirmed)
+  // This also doubles as an RBF-like mechanism: if a previous split TX is stuck,
+  // spending the same confirmed UTXO with a higher fee will replace it.
+  const confirmed = utxos.filter((u) => u.confirmations >= 1);
+  const all = confirmed.length > 0 ? confirmed : utxos;
+  const sorted = [...all].sort((a, b) => (b.value > a.value ? 1 : -1));
   const source = sorted[0];
 
   const totalNeeded = DUMMY_VALUE * BigInt(DUMMY_COUNT) + SPLIT_FEE;
   if (source.value < totalNeeded) {
     throw new Error(
-      `largest UTXO (${source.value} shibes) is too small. Need at least ${totalNeeded} shibes (${DUMMY_COUNT} dummies + fee)`,
+      `largest UTXO (${source.value} shibes / ${Number(source.value) / 1e8} DOGE) is too small. Need at least ${totalNeeded} shibes (${DUMMY_COUNT} dummies + 0.5 DOGE fee)`,
     );
   }
 
@@ -113,7 +119,7 @@ export async function createDummySplit(
   const txHex = tx.toHex();
   const txId = await broadcastTx(txHex);
 
-  console.log(`[utxo] split TX broadcast: ${txId} (${DUMMY_COUNT} dummy UTXOs created)`);
+  console.log(`[utxo] split TX broadcast: ${txId} (${DUMMY_COUNT} dummy UTXOs created, fee=0.5 DOGE)`);
   return { txId, dummyCount: DUMMY_COUNT };
 }
 

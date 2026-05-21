@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getUnlockedSigner } from '@/lib/wallet';
 import { hasDummyUtxos, createDummySplit, hasUnconfirmedDummies } from '@/lib/utxo';
 
@@ -6,9 +6,11 @@ export const dynamic = 'force-dynamic';
 
 // POST /api/wallet/prepare — creates dummy UTXOs by splitting a large UTXO
 // into several small ones (0.001 DOGE each). Required before buying.
-export async function POST() {
+// Pass ?force=true to re-split even if unconfirmed dummies exist (e.g. stuck TX).
+export async function POST(req: NextRequest) {
   try {
     const signer = getUnlockedSigner();
+    const force = req.nextUrl.searchParams.get('force') === 'true';
 
     // Check if we already have confirmed dummies
     const hasDummies = await hasDummyUtxos(signer.address);
@@ -17,12 +19,15 @@ export async function POST() {
     }
 
     // Check if we have unconfirmed ones (from a previous split)
-    const hasUnconfirmed = await hasUnconfirmedDummies(signer.address);
-    if (hasUnconfirmed) {
-      return NextResponse.json({
-        ok: true,
-        message: 'dummy UTXOs already created but waiting for confirmation (~1 min). Do NOT create more — just wait.',
-      });
+    if (!force) {
+      const hasUnconfirmed = await hasUnconfirmedDummies(signer.address);
+      if (hasUnconfirmed) {
+        return NextResponse.json({
+          ok: false,
+          message: 'dummy UTXOs exist but unconfirmed. If stuck for >5 min, the fee was too low. Click "Force re-prepare" to broadcast a higher-fee replacement.',
+          canForce: true,
+        });
+      }
     }
 
     const result = await createDummySplit(signer.address, signer.keyPair);
@@ -30,7 +35,7 @@ export async function POST() {
       ok: true,
       txId: result.txId,
       dummyCount: result.dummyCount,
-      message: `Created ${result.dummyCount} dummy UTXOs. Wait ~1 min for block confirmation before buying.`,
+      message: `Created ${result.dummyCount} dummy UTXOs (fee: 0.5 DOGE). Should confirm in ~1 min.`,
     });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 400 });

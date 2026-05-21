@@ -351,10 +351,20 @@ function WalletPanel({
   }
 
   async function prepareWallet() {
-    if (!confirm('This will broadcast a small TX (~0.02 DOGE fee) to create dummy UTXOs needed for buying. Continue?')) return;
+    if (!confirm('This will broadcast a TX (~0.5 DOGE fee) to create dummy UTXOs needed for buying. Continue?')) return;
     const res = await fetch('/api/wallet/prepare', { method: 'POST' });
     const j = await res.json();
     if (!res.ok) return alert(j.error ?? 'failed');
+    if (j.canForce) {
+      const doForce = confirm(j.message + '\n\nForce re-prepare with higher fee?');
+      if (doForce) {
+        const res2 = await fetch('/api/wallet/prepare?force=true', { method: 'POST' });
+        const j2 = await res2.json();
+        if (!res2.ok) return alert(j2.error ?? 'failed');
+        alert(j2.message ?? `Done! txId: ${j2.txId}`);
+      }
+      return;
+    }
     alert(j.message ?? `Done! txId: ${j.txId}`);
   }
 

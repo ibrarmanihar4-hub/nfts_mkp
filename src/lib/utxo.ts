@@ -69,20 +69,28 @@ export async function createDummySplit(
   const utxos = await fetchUtxos(address);
   if (utxos.length === 0) throw new Error('no UTXOs available to split');
 
-  // Pick the largest CONFIRMED UTXO to split (prefer confirmed over unconfirmed)
-  // This also doubles as an RBF-like mechanism: if a previous split TX is stuck,
-  // spending the same confirmed UTXO with a higher fee will replace it.
-  const confirmed = utxos.filter((u) => u.confirmations >= 1);
-  const all = confirmed.length > 0 ? confirmed : utxos;
-  const sorted = [...all].sort((a, b) => (b.value > a.value ? 1 : -1));
-  const source = sorted[0];
-
-  const totalNeeded = DUMMY_VALUE * BigInt(DUMMY_COUNT) + SPLIT_FEE;
-  if (source.value < totalNeeded) {
+  // IMPORTANT: Only use CONFIRMED UTXOs as source. This also acts as a
+  // "replace by fee" mechanism — if a previous low-fee TX spent the same
+  // confirmed UTXO but is stuck unconfirmed, broadcasting a new TX spending
+  // it with a higher fee via a different node will replace it.
+  const confirmed = utxos.filter((u) => u.confirmations >= 1 && u.value > totalNeededForSplit());
+  
+  if (confirmed.length === 0) {
+    // No confirmed UTXOs large enough — check if there are ANY confirmed UTXOs
+    const anyConfirmed = utxos.filter((u) => u.confirmations >= 1);
+    if (anyConfirmed.length === 0) {
+      throw new Error(
+        'no confirmed UTXOs available. If you have stuck unconfirmed TXs, ' +
+        'either wait 24-72h for them to expire, or send fresh DOGE to this address from an exchange.'
+      );
+    }
     throw new Error(
-      `largest UTXO (${source.value} shibes / ${Number(source.value) / 1e8} DOGE) is too small. Need at least ${totalNeeded} shibes (${DUMMY_COUNT} dummies + 0.5 DOGE fee)`,
+      `largest confirmed UTXO (${anyConfirmed[0].value} shibes) is too small. ` +
+      `Need at least ${totalNeededForSplit()} shibes. Send more DOGE to ${address}.`
     );
   }
+
+  const source = confirmed.sort((a, b) => (b.value > a.value ? 1 : -1))[0];
 
   // Fetch the raw prev TX for nonWitnessUtxo
   const rawTxHex = await fetchRawTx(source.txHash);
@@ -123,6 +131,10 @@ export async function createDummySplit(
   return { txId, dummyCount: DUMMY_COUNT };
 }
 
+function totalNeededForSplit(): bigint {
+  return DUMMY_VALUE * BigInt(DUMMY_COUNT) + SPLIT_FEE;
+}
+
 async function fetchRawTx(txHash: string): Promise<string> {
   // Blockcypher returns the raw hex at /txs/{hash}?includeHex=true
   const url = `${BLOCKCYPHER_BASE}/txs/${txHash}?includeHex=true`;
@@ -134,6 +146,25 @@ async function fetchRawTx(txHash: string): Promise<string> {
 }
 
 async function broadcastTx(txHex: string): Promise<string> {
+  // Try Blockchair first (doesn't share mempool with Blockcypher, better for RBF-like scenarios)
+  try {
+    const bcRes = await fetch('https://api.blockchair.com/dogecoin/push/transaction', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: txHex }),
+    });
+    const bcData = await bcRes.json();
+    if (bcRes.ok && bcData?.data?.transaction_hash) {
+      console.log(`[utxo] broadcast via Blockchair: ${bcData.data.transaction_hash}`);
+      return bcData.data.transaction_hash;
+    }
+    // If Blockchair fails, fall through to Blockcypher
+    console.log(`[utxo] Blockchair failed: ${JSON.stringify(bcData).slice(0, 200)}, trying Blockcypher...`);
+  } catch (e) {
+    console.log(`[utxo] Blockchair error: ${e}, trying Blockcypher...`);
+  }
+
+  // Fallback: Blockcypher
   const url = `${BLOCKCYPHER_BASE}/txs/push`;
   const res = await fetch(url, {
     method: 'POST',

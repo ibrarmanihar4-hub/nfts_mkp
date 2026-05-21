@@ -108,12 +108,34 @@ export async function buyListing(input: {
   buyerTokenReceiveAddress?: string;
   signedBuyingPSBTBase64: string;
 }): Promise<DoggyBuyResult> {
-  return postJson<DoggyBuyResult>('/buyer/buyListing', {
-    listingId: input.listingId,
-    buyerAddress: input.buyerAddress,
-    buyerTokenReceiveAddress: input.buyerTokenReceiveAddress ?? input.buyerAddress,
-    signedBuyingPSBTBase64: input.signedBuyingPSBTBase64,
+  const res = await fetch(`${BASE}/buyer/buyListing`, {
+    method: 'POST',
+    headers: {
+      accept: '*/*',
+      'content-type': 'application/json',
+      'user-agent': UA,
+      origin: 'https://doggy.market',
+      referer: 'https://doggy.market/',
+    },
+    body: JSON.stringify({
+      listingId: input.listingId,
+      buyerAddress: input.buyerAddress,
+      buyerTokenReceiveAddress: input.buyerTokenReceiveAddress ?? input.buyerAddress,
+      signedBuyingPSBTBase64: input.signedBuyingPSBTBase64,
+    }),
+    cache: 'no-store',
   });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`doggy.market POST /buyer/buyListing returned ${res.status}: ${text.slice(0, 300)}`);
+  }
+  // Response can be JSON or plain txId string
+  try {
+    return JSON.parse(text) as DoggyBuyResult;
+  } catch {
+    // Plain text = the txId itself
+    return { txId: text.trim() } as DoggyBuyResult;
+  }
 }
 
 // Create dummy UTXOs via doggy.market's own endpoint.

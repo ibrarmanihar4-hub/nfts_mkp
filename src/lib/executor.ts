@@ -206,7 +206,8 @@ export async function executeBuy(hitId: string): Promise<ExecuteResult> {
       }
       if (scriptHex !== ourScript) continue; // not ours (e.g. seller's input)
       psbt.signInput(i, signer.keyPair);
-      psbt.finalizeInput(i);
+      // DO NOT finalize — doggy.market expects partial signatures in PSBT format.
+      // They finalize + extract on their server before broadcasting.
       signedCount += 1;
     }
 

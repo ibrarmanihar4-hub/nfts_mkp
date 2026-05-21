@@ -18,9 +18,8 @@
 import { prisma } from './prisma';
 import { bitcoin, dogecoinNetwork } from './dogecoin';
 import { getUnlockedSigner } from './wallet';
-import { fetchInscription, createBuyingPSBT, buyListing } from './doggy';
+import { fetchInscription, createBuyingPSBT, buyListing, createDummyPSBT, broadcastViaDoggy } from './doggy';
 import { shibesToDoge } from './units';
-import { hasDummyUtxos, createDummySplit } from './utxo';
 
 const inFlight = new Set<string>();
 
@@ -119,16 +118,48 @@ export async function executeBuy(hitId: string): Promise<ExecuteResult> {
       buyerTokenReceiveAddress: signer.address,
     }).catch((err) => ({ error: err instanceof Error ? err.message : String(err) } as any));
 
-    // Handle "no dummy utxos" error by auto-splitting
+    // Handle "no dummy utxos" error by using doggy.market's own createDummyPSBT
     const quoteError = typeof quote === 'object' && 'error' in quote ? (quote as any).error : null;
     if (quoteError && /dummy.?utxo/i.test(quoteError)) {
-      console.log(`[executor] no dummy utxos — creating split TX for ${signer.address}`);
+      console.log(`[executor] no dummy utxos — calling createDummyPSBT for ${signer.address}`);
       try {
-        const split = await createDummySplit(signer.address, signer.keyPair);
-        console.log(`[executor] split TX ${split.txId} broadcast, waiting 65s for confirmation...`);
-        // Wait for a Dogecoin block (~60s avg)
+        // 1. Get dummy PSBT from doggy.market
+        const dummyQuote = await createDummyPSBT(signer.address);
+
+        // 2. Sign all buyer inputs in the dummy PSBT
+        const dummyPsbt = bitcoin.Psbt.fromBase64(dummyQuote.psbtBase64, { network: dogecoinNetwork });
+        const ourPaymentDummy = bitcoin.payments.p2pkh({
+          pubkey: signer.keyPair.publicKey,
+          network: dogecoinNetwork,
+        });
+        const ourScriptDummy = Buffer.from(ourPaymentDummy.output as Uint8Array).toString('hex');
+
+        for (let i = 0; i < dummyPsbt.data.inputs.length; i++) {
+          const input = dummyPsbt.data.inputs[i];
+          let scriptHex: string | null = null;
+          if (input.witnessUtxo) {
+            scriptHex = Buffer.from(input.witnessUtxo.script).toString('hex');
+          } else if (input.nonWitnessUtxo) {
+            const prevTx = bitcoin.Transaction.fromBuffer(Buffer.from(input.nonWitnessUtxo));
+            const vout = dummyPsbt.txInputs[i].index;
+            scriptHex = Buffer.from(prevTx.outs[vout].script).toString('hex');
+          }
+          if (scriptHex === ourScriptDummy) {
+            dummyPsbt.signInput(i, signer.keyPair);
+            dummyPsbt.finalizeInput(i);
+          }
+        }
+
+        // 3. Extract the raw TX and broadcast via doggy.market's own endpoint
+        const dummyTx = dummyPsbt.extractTransaction(true);
+        const dummyTxHex = dummyTx.toHex();
+        const dummyTxId = await broadcastViaDoggy(dummyTxHex);
+        console.log(`[executor] dummy UTXO TX broadcast via doggy.market: ${dummyTxId}, waiting 65s...`);
+
+        // 4. Wait for confirmation
         await new Promise((r) => setTimeout(r, 65_000));
-        // Retry createBuyingPSBT
+
+        // 5. Retry createBuyingPSBT
         quote = await createBuyingPSBT({
           listingId,
           buyerAddress: signer.address,
@@ -138,9 +169,9 @@ export async function executeBuy(hitId: string): Promise<ExecuteResult> {
         const msg = splitErr instanceof Error ? splitErr.message : String(splitErr);
         await prisma.hit.update({
           where: { id: hit.id },
-          data: { status: 'FAILED', notes: `dummy UTXO split failed: ${msg}` },
+          data: { status: 'FAILED', notes: `dummy UTXO creation failed: ${msg}` },
         });
-        return { ok: false, status: 'FAILED', error: `dummy split failed: ${msg}` };
+        return { ok: false, status: 'FAILED', error: `dummy creation failed: ${msg}` };
       }
     } else if (quoteError) {
       throw new Error(quoteError);

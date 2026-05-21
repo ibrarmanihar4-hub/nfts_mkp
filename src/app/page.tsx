@@ -350,6 +350,14 @@ function WalletPanel({
     onChange();
   }
 
+  async function prepareWallet() {
+    if (!confirm('This will broadcast a small TX (~0.02 DOGE fee) to create dummy UTXOs needed for buying. Continue?')) return;
+    const res = await fetch('/api/wallet/prepare', { method: 'POST' });
+    const j = await res.json();
+    if (!res.ok) return alert(j.error ?? 'failed');
+    alert(j.message ?? `Done! txId: ${j.txId}`);
+  }
+
   return (
     <>
       <h2>Wallet & safety</h2>
@@ -445,17 +453,22 @@ function WalletPanel({
             <button onClick={unlock}>Unlock</button>
           </div>
         ) : (
-          <div className="row">
-            <input
-              placeholder={`daily cap in DOGE (current: ${settings.dailyCapDoge}; 0 = unlimited)`}
-              value={dailyCap}
-              onChange={(e) => setDailyCap(e.target.value)}
-              style={{ flex: 1, minWidth: 240 }}
-              inputMode="decimal"
-            />
-            <button className="secondary" onClick={saveCap}>
-              Save cap
-            </button>
+          <div>
+            <div className="row" style={{ marginBottom: 8 }}>
+              <input
+                placeholder={`daily cap in DOGE (current: ${settings.dailyCapDoge}; 0 = unlimited)`}
+                value={dailyCap}
+                onChange={(e) => setDailyCap(e.target.value)}
+                style={{ flex: 1, minWidth: 240 }}
+                inputMode="decimal"
+              />
+              <button className="secondary" onClick={saveCap}>
+                Save cap
+              </button>
+              <button className="secondary" onClick={prepareWallet}>
+                Prepare dummy UTXOs
+              </button>
+            </div>
           </div>
         )}
       </div>

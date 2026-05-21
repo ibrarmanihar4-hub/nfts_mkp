@@ -20,6 +20,7 @@ import { bitcoin, dogecoinNetwork } from './dogecoin';
 import { getUnlockedSigner } from './wallet';
 import { fetchInscription, createBuyingPSBT, buyListing } from './doggy';
 import { shibesToDoge } from './units';
+import { hasDummyUtxos, createDummySplit } from './utxo';
 
 const inFlight = new Set<string>();
 
@@ -112,12 +113,40 @@ export async function executeBuy(hitId: string): Promise<ExecuteResult> {
     }
 
     // 2. Get the seller-pre-signed PSBT.
-    const quote = await createBuyingPSBT({
+    let quote = await createBuyingPSBT({
       listingId,
       buyerAddress: signer.address,
       buyerTokenReceiveAddress: signer.address,
-    });
-    const psbtBase64 = quote.buyingPSBTBase64 ?? quote.psbtBase64;
+    }).catch((err) => ({ error: err instanceof Error ? err.message : String(err) } as any));
+
+    // Handle "no dummy utxos" error by auto-splitting
+    const quoteError = typeof quote === 'object' && 'error' in quote ? (quote as any).error : null;
+    if (quoteError && /dummy.?utxo/i.test(quoteError)) {
+      console.log(`[executor] no dummy utxos — creating split TX for ${signer.address}`);
+      try {
+        const split = await createDummySplit(signer.address, signer.keyPair);
+        console.log(`[executor] split TX ${split.txId} broadcast, waiting 10s for propagation...`);
+        // Wait for the split TX to propagate to doggy.market's mempool
+        await new Promise((r) => setTimeout(r, 10_000));
+        // Retry createBuyingPSBT
+        quote = await createBuyingPSBT({
+          listingId,
+          buyerAddress: signer.address,
+          buyerTokenReceiveAddress: signer.address,
+        });
+      } catch (splitErr) {
+        const msg = splitErr instanceof Error ? splitErr.message : String(splitErr);
+        await prisma.hit.update({
+          where: { id: hit.id },
+          data: { status: 'FAILED', notes: `dummy UTXO split failed: ${msg}` },
+        });
+        return { ok: false, status: 'FAILED', error: `dummy split failed: ${msg}` };
+      }
+    } else if (quoteError) {
+      throw new Error(quoteError);
+    }
+
+    const psbtBase64 = (quote as any).buyingPSBTBase64 ?? (quote as any).psbtBase64;
     if (!psbtBase64) {
       throw new Error(`createBuyingPSBT returned no psbt: ${JSON.stringify(quote).slice(0, 200)}`);
     }

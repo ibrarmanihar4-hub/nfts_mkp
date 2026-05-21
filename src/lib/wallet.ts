@@ -7,9 +7,13 @@
 //   - On process exit / lock(), the in-memory key is wiped.
 //
 // Setup flow:
-//   1. POST /api/wallet { wif, passphrase } -> stores encrypted blob + derives address
+//   1. POST /api/wallet { wif OR mnemonic, passphrase } -> stores encrypted blob + derives address
 //   2. POST /api/wallet/unlock { passphrase } -> decrypts key into memory for signing
 //   3. POST /api/wallet/lock -> wipes in-memory key
+//
+// Supports:
+//   - WIF private key (starts with Q or 6)
+//   - BIP39 mnemonic (12/24-word seed phrase) — derived via BIP44 m/44'/3'/0'/0/0
 //
 // If you restart the server, the wallet is locked and auto-buy pauses until you
 // unlock it again. That's intentional.
@@ -18,6 +22,15 @@ import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from 'node:
 import { prisma } from './prisma';
 import { bitcoin, dogecoinNetwork, ECPair } from './dogecoin';
 import type { ECPairInterface } from 'ecpair';
+import * as bip39 from 'bip39';
+import { BIP32Factory } from 'bip32';
+import * as ecc from 'tiny-secp256k1';
+
+const bip32 = BIP32Factory(ecc);
+
+// BIP44 derivation path for Dogecoin (coin_type = 3)
+// m/44'/3'/0'/0/0 is the first receive address
+const DOGE_BIP44_PATH = "m/44'/3'/0'/0/0";
 
 const SCRYPT_N = 16384;
 const SCRYPT_r = 8;
@@ -72,15 +85,33 @@ export async function getWalletStatus(): Promise<WalletStatus> {
   };
 }
 
-export async function setupWallet(wif: string, passphrase: string): Promise<{ address: string }> {
+export async function setupWallet(input: { wif?: string; mnemonic?: string }, passphrase: string): Promise<{ address: string }> {
   if (passphrase.length < 8) throw new Error('passphrase must be at least 8 chars');
+  if (!input.wif && !input.mnemonic) throw new Error('provide either wif or mnemonic');
+
   let kp: ECPairInterface;
-  try {
-    kp = ECPair.fromWIF(wif, dogecoinNetwork);
-  } catch {
-    throw new Error('invalid Dogecoin WIF private key');
+
+  if (input.mnemonic) {
+    // BIP39 mnemonic (12/24 words) → BIP44 derivation → Dogecoin key
+    const mnemonic = input.mnemonic.trim().toLowerCase();
+    if (!bip39.validateMnemonic(mnemonic)) {
+      throw new Error('invalid mnemonic — must be 12 or 24 words from the BIP39 wordlist');
+    }
+    const seed = bip39.mnemonicToSeedSync(mnemonic);
+    const root = bip32.fromSeed(seed, dogecoinNetwork);
+    const child = root.derivePath(DOGE_BIP44_PATH);
+    if (!child.privateKey) throw new Error('derivation did not yield a private key');
+    kp = ECPair.fromPrivateKey(Buffer.from(child.privateKey), { network: dogecoinNetwork });
+  } else {
+    // Raw WIF key
+    try {
+      kp = ECPair.fromWIF(input.wif!, dogecoinNetwork);
+    } catch {
+      throw new Error('invalid Dogecoin WIF private key');
+    }
   }
-  if (!kp.privateKey) throw new Error('WIF did not yield a private key');
+
+  if (!kp.privateKey) throw new Error('key did not yield a private key');
   const { address } = bitcoin.payments.p2pkh({
     pubkey: kp.publicKey,
     network: dogecoinNetwork,

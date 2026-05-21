@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
+    "bip32": "^5.0.1",
+    "bip39": "^3.1.0",
     "bitcoinjs-lib": "^7.0.1",
     "bs58check": "^4.0.0",
     "ecpair": "^3.0.1",

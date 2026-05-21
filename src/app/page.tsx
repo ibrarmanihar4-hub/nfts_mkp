@@ -285,6 +285,8 @@ function WalletPanel({
   onChange: () => void;
 }) {
   const [wif, setWif] = useState('');
+  const [mnemonic, setMnemonic] = useState('');
+  const [keyMode, setKeyMode] = useState<'mnemonic' | 'wif'>('mnemonic');
   const [pass, setPass] = useState('');
   const [unlockPass, setUnlockPass] = useState('');
   const [dailyCap, setDailyCap] = useState('');
@@ -292,17 +294,22 @@ function WalletPanel({
   if (!wallet || !settings) return null;
 
   async function setup() {
-    if (!wif || pass.length < 8) return alert('Provide WIF + passphrase (8+ chars)');
-    if (!confirm('Save encrypted WIF? Existing key will be overwritten.')) return;
+    const key = keyMode === 'mnemonic' ? mnemonic.trim() : wif.trim();
+    if (!key || pass.length < 8) return alert('Provide key + passphrase (8+ chars)');
+    if (!confirm('Save encrypted key? Existing key will be overwritten.')) return;
+    const payload = keyMode === 'mnemonic'
+      ? { mnemonic: key, passphrase: pass }
+      : { wif: key, passphrase: pass };
     const res = await fetch('/api/wallet', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ wif, passphrase: pass }),
+      body: JSON.stringify(payload),
     });
     const j = await res.json();
     if (!res.ok) return alert(j.error ?? 'failed');
     alert(`Saved. Address: ${j.address}`);
     setWif('');
+    setMnemonic('');
     setPass('');
     onChange();
   }
@@ -379,22 +386,52 @@ function WalletPanel({
         </div>
 
         {!wallet.configured ? (
-          <div className="row">
-            <input
-              placeholder="Dogecoin WIF private key (Q… or 6…)"
-              value={wif}
-              onChange={(e) => setWif(e.target.value)}
-              style={{ flex: 1, minWidth: 240 }}
-              type="password"
-            />
-            <input
-              placeholder="passphrase (8+ chars)"
-              value={pass}
-              onChange={(e) => setPass(e.target.value)}
-              style={{ width: 220 }}
-              type="password"
-            />
-            <button onClick={setup}>Save encrypted</button>
+          <div>
+            <div className="row" style={{ marginBottom: 8 }}>
+              <button
+                className={keyMode === 'mnemonic' ? '' : 'secondary'}
+                onClick={() => setKeyMode('mnemonic')}
+                type="button"
+                style={{ fontSize: 12, padding: '4px 10px' }}
+              >
+                Seed phrase
+              </button>
+              <button
+                className={keyMode === 'wif' ? '' : 'secondary'}
+                onClick={() => setKeyMode('wif')}
+                type="button"
+                style={{ fontSize: 12, padding: '4px 10px' }}
+              >
+                WIF key
+              </button>
+            </div>
+            <div className="row">
+              {keyMode === 'mnemonic' ? (
+                <input
+                  placeholder="12 or 24-word seed phrase"
+                  value={mnemonic}
+                  onChange={(e) => setMnemonic(e.target.value)}
+                  style={{ flex: 1, minWidth: 240 }}
+                  type="password"
+                />
+              ) : (
+                <input
+                  placeholder="Dogecoin WIF private key (Q… or 6…)"
+                  value={wif}
+                  onChange={(e) => setWif(e.target.value)}
+                  style={{ flex: 1, minWidth: 240 }}
+                  type="password"
+                />
+              )}
+              <input
+                placeholder="passphrase (8+ chars)"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+                style={{ width: 220 }}
+                type="password"
+              />
+              <button onClick={setup}>Save encrypted</button>
+            </div>
           </div>
         ) : !wallet.unlocked ? (
           <div className="row">

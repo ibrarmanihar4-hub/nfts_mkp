@@ -123,3 +123,107 @@ npm run dev   # http://localhost:3000
 - [ ] Per-collection floor-price tracker with auto-suggested max
 - [ ] WebSocket push from server → dashboard instead of 5s poll
 - [ ] Discord webhook in addition to Telegram
+
+
+
+---
+
+## Deploy to Fly.io (free tier)
+
+Fly.io's free tier gives you 3 always-on shared VMs + 3GB persistent storage.
+Unlike Vercel, Fly runs persistent processes — perfect for this bot's poller.
+
+### 1. Install flyctl
+
+```bash
+# macOS:    brew install flyctl
+# Linux:    curl -L https://fly.io/install.sh | sh
+# Windows:  iwr https://fly.io/install.ps1 -useb | iex
+```
+
+### 2. Sign up & login
+
+```bash
+flyctl auth signup     # or: flyctl auth login
+```
+
+### 3. Configure your app
+
+Edit `fly.toml`:
+- Change `app = "doggy-sniper"` to a unique name (e.g. `app = "doggy-sniper-yourname"`)
+- Pick a region close to doggy.market: `iad` (US-East) or `ewr` (NJ) is good
+
+### 4. Create the app and persistent volume
+
+```bash
+flyctl launch --copy-config --no-deploy --name <your-app-name>
+flyctl volumes create sniper_data --size 1 --region iad   # match primary_region
+```
+
+### 5. Set secrets (these are encrypted, never in git)
+
+**REQUIRED**: a strong password to protect your dashboard from the public:
+```bash
+flyctl secrets set BASIC_AUTH_PASSWORD="$(openssl rand -base64 32)"
+```
+Save the password — you'll need it to log into the dashboard.
+
+Optional Telegram alerts:
+```bash
+flyctl secrets set TELEGRAM_BOT_TOKEN="your-token"
+flyctl secrets set TELEGRAM_CHAT_ID="your-chat-id"
+```
+
+### 6. Deploy
+
+```bash
+flyctl deploy
+```
+
+After ~2 minutes you'll get a URL like `https://doggy-sniper-yourname.fly.dev`.
+
+Open it — your browser will prompt for credentials:
+- **Username**: `admin` (any value works — only password is checked)
+- **Password**: the `BASIC_AUTH_PASSWORD` you set
+
+### 7. Use the dashboard
+
+Same as local: setup wallet → unlock → add watches → toggle Auto-buy.
+
+### Useful commands
+
+```bash
+flyctl logs                       # live logs
+flyctl status                     # is it running?
+flyctl ssh console                # shell into the VM
+flyctl secrets list               # see which secrets are set (values hidden)
+flyctl deploy                     # redeploy after code changes
+flyctl scale memory 1024          # bump RAM if you watch many collections
+flyctl machine restart            # restart (locks wallet — must re-unlock)
+```
+
+### Limits & costs (free tier)
+
+| Resource | Free | Note |
+|---|---|---|
+| VMs | 3× shared-cpu-1x | We use 1 |
+| RAM | 256MB-1GB per VM | 512MB plenty |
+| Volume | 3GB total | We use 1GB |
+| Outbound traffic | 160GB/mo | Way more than enough |
+
+**Stays free** as long as you don't exceed these. Polling 1×/sec uses ~10MB/day of bandwidth.
+
+### Security on a public deploy
+
+- ✅ Dashboard requires basic auth (set above)
+- ✅ Wallet locks on every deploy/restart — you must re-enter the passphrase
+- ✅ Encrypted seed phrase only on the persistent volume (not in git, not in logs)
+- ✅ HTTPS automatic (Fly's edge does TLS)
+- ⚠️ Use a STRONG `BASIC_AUTH_PASSWORD` — anyone who guesses it can manipulate your watches/buys
+- ⚠️ Use a STRONG wallet passphrase — anyone with the basic-auth password could try to brute force this
+- ⚠️ Use a SEPARATE snipe wallet with limited funds — never your main DOGE holdings
+
+### Latency
+
+Fly.io VMs are in real datacenters — much faster than your home internet to
+doggy.market (typically 50-150ms vs 200-400ms residential).

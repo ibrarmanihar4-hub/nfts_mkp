@@ -1,0 +1,48 @@
+# Fly.io config for Doggy Sniper
+# Free tier: 3 shared-cpu-1x VMs, 256MB-1GB RAM, 3GB persistent volume.
+#
+# Setup (one-time):
+#   1. curl -L https://fly.io/install.sh | sh   (or `brew install flyctl`)
+#   2. flyctl auth signup
+#   3. flyctl launch --copy-config --no-deploy
+#      (this picks an app name; the wizard will detect this fly.toml)
+#   4. flyctl volumes create sniper_data --size 1 --region <your-region>
+#   5. flyctl secrets set BASIC_AUTH_PASSWORD="<a long random password>"
+#      flyctl secrets set TELEGRAM_BOT_TOKEN="..."   # optional
+#      flyctl secrets set TELEGRAM_CHAT_ID="..."     # optional
+#   6. flyctl deploy
+#
+# After deploy: open https://<your-app>.fly.dev — you'll be prompted for
+# username "admin" and the password you set above.
+
+app = "doggy-sniper"   # CHANGE THIS — must be globally unique on fly.io
+
+# Pick a region close to doggy.market for low latency.
+# Good choices: iad (US-East), ewr (US-East-NJ), ams (Amsterdam), fra (Frankfurt).
+primary_region = "iad"
+
+[build]
+
+[env]
+  POLL_INTERVAL_MS = "1000"
+  NODE_ENV = "production"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "off"   # CRITICAL: keep running so the poller never sleeps
+  auto_start_machines = true
+  min_machines_running = 1     # always at least 1 instance running
+  processes = ["app"]
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512   # 512MB is enough; bump to 1024 if you watch many collections
+
+# Persistent disk for SQLite DB (encrypted seed phrase + watches/hits).
+# This survives deploys and restarts. Without this, your wallet config wipes
+# every time you redeploy.
+[mounts]
+  source = "sniper_data"
+  destination = "/data"

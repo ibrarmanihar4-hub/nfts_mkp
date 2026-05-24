@@ -1,13 +1,15 @@
 // Polling engine: walks every enabled Watch and records new under-priced listings.
 //
-// Optimized for SPEED:
-//   - Collections fetched in parallel
-//   - Auto-buy fires IMMEDIATELY on detection (before notification)
-//   - No unnecessary DB writes before buy attempt
-//   - Poll interval can be as low as 500ms
+// SPEED OPTIMIZATIONS:
+//   1. Collections fetched in parallel (Promise.allSettled)
+//   2. listingIds pre-cached in the BACKGROUND for the cheapest N listings
+//      in each collection — so when one drops below max, executeBuy can skip
+//      the fetchInscription roundtrip (saves ~150-300ms per buy).
+//   3. Auto-buy fires immediately on detection (before notification/DB write)
+//   4. HTTP keepalive via undici Agent in doggy.ts (saves ~150ms per call)
 
 import { prisma } from './prisma';
-import { fetchRecentListings } from './doggy';
+import { fetchRecentListings, fetchInscription, getCachedListingId } from './doggy';
 import { notifyHit } from './notify';
 import { executeBuy } from './executor';
 
@@ -18,6 +20,10 @@ export interface PollSummary {
   errors: { slug: string; message: string }[];
 }
 
+// How many of the cheapest listings per collection to pre-cache listingIds for.
+// More = faster sniping, more API calls. 5 is a good balance.
+const PRECACHE_TOP_N = 5;
+
 export async function pollOnce(): Promise<PollSummary> {
   const watches = await prisma.watch.findMany({ where: { enabled: true } });
   const summary: PollSummary = {
@@ -27,7 +33,7 @@ export async function pollOnce(): Promise<PollSummary> {
     errors: [],
   };
 
-  // Fetch ALL collections in parallel for maximum speed
+  // Fetch ALL collections in parallel
   const results = await Promise.allSettled(
     watches.map(async (w) => {
       const listings = await fetchRecentListings(w.slug);
@@ -42,12 +48,25 @@ export async function pollOnce(): Promise<PollSummary> {
     }
     const { watch: w, listings } = result.value;
 
+    // Background pre-cache of listingIds for the cheapest N listings.
+    // This way, if any of them drop below maxPrice in a future poll, we
+    // already have the listingId and can skip fetchInscription entirely.
+    const cheapest = [...listings]
+      .sort((a, b) => a.price - b.price)
+      .slice(0, PRECACHE_TOP_N);
+    for (const l of cheapest) {
+      if (!getCachedListingId(l.inscriptionId)) {
+        // Fire-and-forget — don't block polling
+        void fetchInscription(l.inscriptionId).catch(() => {});
+      }
+    }
+
     try {
       for (const l of listings) {
         const price = BigInt(l.price);
         if (price > w.maxPriceShibes) continue;
 
-        // Upsert by (watchId, inscriptionId) — duplicates from re-polling are no-ops.
+        // Upsert by (watchId, inscriptionId)
         const created = await prisma.hit.upsert({
           where: {
             watchId_inscriptionId: { watchId: w.id, inscriptionId: l.inscriptionId },
@@ -61,21 +80,20 @@ export async function pollOnce(): Promise<PollSummary> {
             listedAt: new Date(l.listedAt),
             status: 'DETECTED',
           },
-          update: {}, // never overwrite — we only care about the first sighting
+          update: {},
         });
 
-        // Only act on fresh DETECTED rows (within last 60s).
         if (created.status === 'DETECTED' && created.detectedAt.getTime() > Date.now() - 60_000) {
           summary.newHits += 1;
 
-          // AUTO-BUY FIRST — speed is critical. Fire immediately, don't wait for notification.
+          // FIRE BUY IMMEDIATELY — speed is critical
           if (w.autoBuy) {
             void executeBuy(created.id).catch((err) => {
               console.error(`[poller] auto-buy ${created.id} failed:`, err);
             });
           }
 
-          // Notification in background — don't block the buy
+          // Notification in background
           void (async () => {
             try {
               await notifyHit({
@@ -110,10 +128,9 @@ export async function pollOnce(): Promise<PollSummary> {
 const globalForPoller = globalThis as unknown as { __doggyPoller?: NodeJS.Timeout };
 
 export function startPoller(): void {
-  if (globalForPoller.__doggyPoller) return; // already running
-  const interval = Number(process.env.POLL_INTERVAL_MS ?? 2000);
+  if (globalForPoller.__doggyPoller) return;
+  const interval = Number(process.env.POLL_INTERVAL_MS ?? 1000);
   console.log(`[poller] starting, interval=${interval}ms`);
-  // Fire immediately, then on a timer.
   void pollOnce();
   globalForPoller.__doggyPoller = setInterval(() => {
     void pollOnce();

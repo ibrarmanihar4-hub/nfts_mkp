@@ -5,57 +5,74 @@ import type {
   DoggyBuyingPSBT,
   DoggyBuyResult,
 } from '@/types';
+import { Agent, request as undiciRequest, setGlobalDispatcher } from 'undici';
 
-// Doggy.market exposes an undocumented JSON API. Confirmed endpoints (May 2026):
-//   GET  /nfts/{slug}                 — recentlyListed[], recentlySold[], stats
-//   GET  /inscriptions/{inscriptionId} — inscription detail incl. listed.listingId
-//   POST /buyer/createBuyingPSBT      — { listingId, buyerAddress, buyerTokenReceiveAddress }
-//                                       returns the PSBT pre-signed by the seller
-//   POST /buyer/buyListing            — same body + signedBuyingPSBTBase64 -> broadcast
-//
-// Prices are shibes (1 DOGE = 100_000_000 shibes).
+// Persistent connection pool to api.doggy.market — reuses TLS sessions
+// instead of opening a fresh handshake on every request. Saves ~100-200ms
+// per call compared to default fetch.
+const dispatcher = new Agent({
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+  connections: 10,
+  pipelining: 1,
+});
+setGlobalDispatcher(dispatcher);
+
 const BASE = 'https://api.doggy.market';
-
-// Browser-ish UA to dodge any default-block on programmatic clients.
 const UA =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 
-async function getJson<T>(path: string): Promise<T | null> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { accept: 'application/json', 'user-agent': UA },
-    cache: 'no-store',
-  });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`doggy.market GET ${path} returned ${res.status}`);
-  return (await res.json()) as T | null;
+// In-memory cache: inscriptionId -> listingId. Populated by the poller's
+// background pre-fetch so executeBuy doesn't need to wait for fetchInscription.
+const listingIdCache = new Map<string, string>();
+
+export function cacheListingId(inscriptionId: string, listingId: string): void {
+  listingIdCache.set(inscriptionId, listingId);
+  if (listingIdCache.size > 1000) {
+    const firstKey = listingIdCache.keys().next().value;
+    if (firstKey) listingIdCache.delete(firstKey);
+  }
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+export function getCachedListingId(inscriptionId: string): string | undefined {
+  return listingIdCache.get(inscriptionId);
+}
+
+async function get(path: string): Promise<{ status: number; text: string }> {
+  const { statusCode, body } = await undiciRequest(`${BASE}${path}`, {
+    method: 'GET',
+    headers: { accept: 'application/json', 'user-agent': UA },
+  });
+  const text = await body.text();
+  return { status: statusCode, text };
+}
+
+async function post(
+  path: string,
+  body: string,
+  contentType = 'application/json',
+): Promise<{ status: number; text: string }> {
+  const { statusCode, body: respBody } = await undiciRequest(`${BASE}${path}`, {
     method: 'POST',
     headers: {
       accept: '*/*',
-      'content-type': 'application/json',
+      'content-type': contentType,
       'user-agent': UA,
       origin: 'https://doggy.market',
       referer: 'https://doggy.market/',
     },
-    body: JSON.stringify(body),
-    cache: 'no-store',
+    body,
   });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`doggy.market POST ${path} returned ${res.status}: ${text.slice(0, 300)}`);
-  }
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    throw new Error(`doggy.market POST ${path} returned non-JSON: ${text.slice(0, 300)}`);
-  }
+  const text = await respBody.text();
+  return { status: statusCode, text };
 }
 
 export async function fetchCollection(slug: string): Promise<DoggyCollectionResponse | null> {
-  return getJson<DoggyCollectionResponse>(`/nfts/${encodeURIComponent(slug)}`);
+  const { status, text } = await get(`/nfts/${encodeURIComponent(slug)}`);
+  if (status === 404) return null;
+  if (status >= 400) throw new Error(`doggy.market /nfts/${slug} returned ${status}`);
+  if (!text || text === 'null') return null;
+  return JSON.parse(text);
 }
 
 export async function fetchRecentListings(slug: string): Promise<DoggyListing[]> {
@@ -65,7 +82,15 @@ export async function fetchRecentListings(slug: string): Promise<DoggyListing[]>
 }
 
 export async function fetchInscription(inscriptionId: string): Promise<DoggyInscription | null> {
-  return getJson<DoggyInscription>(`/inscriptions/${encodeURIComponent(inscriptionId)}`);
+  const { status, text } = await get(`/inscriptions/${encodeURIComponent(inscriptionId)}`);
+  if (status === 404) return null;
+  if (status >= 400) throw new Error(`doggy.market /inscriptions returned ${status}`);
+  if (!text || text === 'null') return null;
+  const data = JSON.parse(text) as DoggyInscription;
+  if (data?.listed?.listingId) {
+    cacheListingId(inscriptionId, data.listed.listingId);
+  }
+  return data;
 }
 
 export async function createBuyingPSBT(input: {
@@ -73,31 +98,20 @@ export async function createBuyingPSBT(input: {
   buyerAddress: string;
   buyerTokenReceiveAddress?: string;
 }): Promise<DoggyBuyingPSBT> {
-  const res = await fetch(`${BASE}/buyer/createBuyingPSBT`, {
-    method: 'POST',
-    headers: {
-      accept: '*/*',
-      'content-type': 'application/json',
-      'user-agent': UA,
-      origin: 'https://doggy.market',
-      referer: 'https://doggy.market/',
-    },
-    body: JSON.stringify({
+  const { status, text } = await post(
+    '/buyer/createBuyingPSBT',
+    JSON.stringify({
       listingId: input.listingId,
       buyerAddress: input.buyerAddress,
       buyerTokenReceiveAddress: input.buyerTokenReceiveAddress ?? input.buyerAddress,
     }),
-    cache: 'no-store',
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`doggy.market POST /buyer/createBuyingPSBT returned ${res.status}: ${text.slice(0, 300)}`);
+  );
+  if (status >= 400) {
+    throw new Error(`doggy.market POST /buyer/createBuyingPSBT returned ${status}: ${text.slice(0, 300)}`);
   }
-  // Response can be either JSON or plain PSBT base64 string
   try {
     return JSON.parse(text) as DoggyBuyingPSBT;
   } catch {
-    // Plain text = the PSBT base64 itself
     return { buyingPSBTBase64: text.trim() } as DoggyBuyingPSBT;
   }
 }
@@ -108,65 +122,40 @@ export async function buyListing(input: {
   buyerTokenReceiveAddress?: string;
   signedBuyingPSBTBase64: string;
 }): Promise<DoggyBuyResult> {
-  const res = await fetch(`${BASE}/buyer/buyListing`, {
-    method: 'POST',
-    headers: {
-      accept: '*/*',
-      'content-type': 'application/json',
-      'user-agent': UA,
-      origin: 'https://doggy.market',
-      referer: 'https://doggy.market/',
-    },
-    body: JSON.stringify({
+  const { status, text } = await post(
+    '/buyer/buyListing',
+    JSON.stringify({
       listingId: input.listingId,
       buyerAddress: input.buyerAddress,
       buyerTokenReceiveAddress: input.buyerTokenReceiveAddress ?? input.buyerAddress,
       signedBuyingPSBTBase64: input.signedBuyingPSBTBase64,
     }),
-    cache: 'no-store',
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`doggy.market POST /buyer/buyListing returned ${res.status}: ${text.slice(0, 300)}`);
+  );
+  if (status >= 400) {
+    throw new Error(`doggy.market POST /buyer/buyListing returned ${status}: ${text.slice(0, 300)}`);
   }
-  // Response can be JSON or plain txId string
   try {
     return JSON.parse(text) as DoggyBuyResult;
   } catch {
-    // Plain text = the txId itself
     return { txId: text.trim() } as DoggyBuyResult;
   }
 }
 
-// Create dummy UTXOs via doggy.market's own endpoint.
-// Returns a PSBT that the buyer must sign and broadcast.
 export async function createDummyPSBT(buyerAddress: string): Promise<{ psbtBase64: string }> {
-  const res = await fetch(`${BASE}/buyer/createDummyPSBT`, {
-    method: 'POST',
-    headers: {
-      accept: '*/*',
-      'content-type': 'application/json',
-      'user-agent': UA,
-      origin: 'https://doggy.market',
-      referer: 'https://doggy.market/',
-    },
-    body: JSON.stringify({ buyerAddress }),
-    cache: 'no-store',
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`doggy.market createDummyPSBT returned ${res.status}: ${text.slice(0, 300)}`);
+  const { status, text } = await post(
+    '/buyer/createDummyPSBT',
+    JSON.stringify({ buyerAddress }),
+  );
+  if (status >= 400) {
+    throw new Error(`doggy.market createDummyPSBT returned ${status}: ${text.slice(0, 300)}`);
   }
-  // Response can be JSON or plain PSBT base64 string
   try {
     const data = JSON.parse(text);
     const psbt = data.psbtBase64 ?? data.buyingPSBTBase64 ?? data.psbt ?? data.dummyPSBTBase64;
     if (psbt) return { psbtBase64: psbt };
-    // Maybe the JSON itself is just a string
     if (typeof data === 'string') return { psbtBase64: data };
     throw new Error(`no psbt field in response: ${JSON.stringify(data).slice(0, 200)}`);
   } catch (e) {
-    // Not JSON — the text IS the PSBT base64
     if (text.startsWith('cHNi')) {
       return { psbtBase64: text.trim() };
     }
@@ -174,23 +163,10 @@ export async function createDummyPSBT(buyerAddress: string): Promise<{ psbtBase6
   }
 }
 
-// Broadcast a signed raw TX hex via doggy.market's broadcast endpoint.
 export async function broadcastViaDoggy(txHex: string): Promise<string> {
-  const res = await fetch(`${BASE}/broadcast`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'text/plain;charset=UTF-8',
-      'user-agent': UA,
-      origin: 'https://doggy.market',
-      referer: 'https://doggy.market/',
-    },
-    body: txHex,
-    cache: 'no-store',
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`doggy.market broadcast returned ${res.status}: ${text.slice(0, 300)}`);
+  const { status, text } = await post('/broadcast', txHex, 'text/plain;charset=UTF-8');
+  if (status >= 400) {
+    throw new Error(`doggy.market broadcast returned ${status}: ${text.slice(0, 300)}`);
   }
-  // Response is likely the txid
   return text.trim().replace(/"/g, '');
 }

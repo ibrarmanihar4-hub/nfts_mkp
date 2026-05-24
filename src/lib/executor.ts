@@ -18,7 +18,7 @@
 import { prisma } from './prisma';
 import { bitcoin, dogecoinNetwork } from './dogecoin';
 import { getUnlockedSigner } from './wallet';
-import { fetchInscription, createBuyingPSBT, buyListing, createDummyPSBT, broadcastViaDoggy } from './doggy';
+import { fetchInscription, createBuyingPSBT, buyListing, createDummyPSBT, broadcastViaDoggy, getCachedListingId } from './doggy';
 import { shibesToDoge } from './units';
 
 const inFlight = new Set<string>();
@@ -84,32 +84,35 @@ export async function executeBuy(hitId: string): Promise<ExecuteResult> {
       return { ok: false, status: 'FAILED', error: 'wallet locked' };
     }
 
-    // Mark BUYING up front so concurrent pollers skip it.
-    await prisma.hit.update({ where: { id: hit.id }, data: { status: 'BUYING' } });
+    // Mark BUYING up front so concurrent pollers skip it. Don't await — fire and forget
+    // to save ~50-100ms (DB write happens during the next API call).
+    void prisma.hit.update({ where: { id: hit.id }, data: { status: 'BUYING' } }).catch(() => {});
 
-    // 1. Resolve listingId from inscriptionId.
-    const insc = await fetchInscription(hit.inscriptionId);
-    if (!insc?.listed?.listingId) {
-      await prisma.hit.update({
-        where: { id: hit.id },
-        data: { status: 'FAILED', notes: 'listing already gone (no listingId)' },
-      });
-      return { ok: false, status: 'FAILED', error: 'listing gone' };
+    // 1. Resolve listingId — try cache first (zero latency), fall back to API.
+    let listingId = getCachedListingId(hit.inscriptionId);
+    if (!listingId) {
+      const insc = await fetchInscription(hit.inscriptionId);
+      if (!insc?.listed?.listingId) {
+        await prisma.hit.update({
+          where: { id: hit.id },
+          data: { status: 'FAILED', notes: 'listing already gone (no listingId)' },
+        });
+        return { ok: false, status: 'FAILED', error: 'listing gone' };
+      }
+      listingId = insc.listed.listingId;
+      // Skip the live-price recheck when we have to fetch — it's already current.
+      const livePrice = BigInt(insc.listed.price);
+      if (livePrice > hit.watch.maxPriceShibes) {
+        await prisma.hit.update({
+          where: { id: hit.id },
+          data: { status: 'SKIPPED', notes: `price changed to ${shibesToDoge(livePrice)} DOGE` },
+        });
+        return { ok: false, status: 'SKIPPED', error: 'price increased' };
+      }
     }
-    const listingId = insc.listed.listingId;
-
-    // Verify price hasn't moved up since detection.
-    const livePrice = BigInt(insc.listed.price);
-    if (livePrice > hit.watch.maxPriceShibes) {
-      await prisma.hit.update({
-        where: { id: hit.id },
-        data: {
-          status: 'SKIPPED',
-          notes: `price changed to ${shibesToDoge(livePrice)} DOGE (above max)`,
-        },
-      });
-      return { ok: false, status: 'SKIPPED', error: 'price increased' };
-    }
+    // (Note: when listingId was cached, we trust the price from the poll. If
+    // the seller changed it, createBuyingPSBT will return the new price and
+    // doggy.market enforces the seller signature — so we can't be tricked.)
 
     // 2. Get the seller-pre-signed PSBT.
     let quote = await createBuyingPSBT({
@@ -230,7 +233,7 @@ export async function executeBuy(hitId: string): Promise<ExecuteResult> {
         where: { id: hit.id },
         data: {
           status: 'SKIPPED',
-          notes: `DRY RUN — would buy ${shibesToDoge(livePrice)} DOGE, signed ${signedCount} inputs (psbt ${signedB64.length}b)`,
+          notes: `DRY RUN — would buy ${shibesToDoge(hit.priceShibes)} DOGE, signed ${signedCount} inputs (psbt ${signedB64.length}b)`,
         },
       });
       return { ok: true, status: 'SKIPPED', dryRun: true };

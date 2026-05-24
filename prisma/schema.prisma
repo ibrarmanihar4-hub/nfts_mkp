@@ -2,7 +2,9 @@
 // Prices are stored in shibes (1 DOGE = 100,000,000 shibes) to avoid float drift.
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // Compile engines for both local dev and Linux container deploys.
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
